@@ -2,13 +2,15 @@
 
 This is the heart of YUiOS. It orchestrates:
 1. User input -> Memory context loading
-2. Intent detection
+2. Intent detection + last_topic update (immediate, no extra cost)
 3. Agent routing
-4. Response generation
-5. Memory updates (profile, facts, events) in a single LLM call
+4. Response generation (returned immediately)
+5. Memory updates in background thread (profile, facts, events)
 """
 
 from __future__ import annotations
+
+import threading
 
 from yuios.core.llm_client import LLMClient
 from yuios.core.intent_engine import IntentEngine
@@ -55,7 +57,12 @@ class ConversationEngine:
         self.memory.increment_conversation_count()
 
     def process(self, user_input: str) -> str:
-        """Process user input through the full YUiOS pipeline."""
+        """Process user input through the full YUiOS pipeline.
+
+        Timeline:
+          [blocking]  intent detect → agent run → return response
+          [background]                              → _update_memory
+        """
 
         # 1. Record user input (short-term)
         self.memory.add_conversation("user", user_input)
@@ -68,47 +75,65 @@ class ConversationEngine:
             "history": self.memory.get_recent_history(20),
         }
 
-        # 3. Detect intent
-        intent = self.intent_engine.detect(user_input)
+        # 3. Detect intent + extract topic (single LLM call)
+        result = self.intent_engine.detect(user_input)
+        intent = result["intent"]
+        topic = result["topic"]
 
-        # 4. Route to appropriate agent
+        # 4. Update last_topic immediately (cost: 0)
+        if topic:
+            self.memory.update_profile("last_topic", topic)
+
+        # 5. Route to appropriate agent
         agent = self.router.route(intent)
 
-        # 5. Execute agent
+        # 6. Execute agent
         response = agent.run(user_input, context)
 
-        # 6. Save response (short-term)
+        # 7. Save response (short-term)
         self.memory.add_conversation("assistant", response)
 
-        # 7. Update all 3 memory layers in a single LLM call
-        self._update_memory(user_input)
+        # 8. Update memory in background (profile/facts/events)
+        #    Does NOT block the response.
+        thread = threading.Thread(
+            target=self._update_memory,
+            args=(user_input,),
+            daemon=True,
+        )
+        thread.start()
 
         return response
 
     def _update_memory(self, user_input: str):
-        """Extract profile, facts, and events from user input in one LLM call."""
-        prompt = MEMORY_EXTRACTION_PROMPT.format(user_input=user_input)
-        messages = [{"role": "user", "content": prompt}]
-        result = self.llm.chat(messages, temperature=0.0)
+        """Extract profile, facts, and events from user input.
 
-        if not result.strip() or result.strip() == "なし":
-            return
+        Runs in a background thread — never blocks the response.
+        """
+        try:
+            prompt = MEMORY_EXTRACTION_PROMPT.format(user_input=user_input)
+            messages = [{"role": "user", "content": prompt}]
+            result = self.llm.chat(messages, temperature=0.0)
 
-        for line in result.strip().split("\n"):
-            line = line.strip()
-            if not line or line == "なし":
-                continue
+            if not result.strip() or result.strip() == "なし":
+                return
 
-            if line.startswith("profile:"):
-                self._handle_profile(line)
-            elif line.startswith("fact:"):
-                fact = line[5:].strip()
-                if fact:
-                    self.memory.add_fact(fact)
-            elif line.startswith("event:"):
-                event = line[6:].strip()
-                if event:
-                    self.memory.add_recent_event(event)
+            for line in result.strip().split("\n"):
+                line = line.strip()
+                if not line or line == "なし":
+                    continue
+
+                if line.startswith("profile:"):
+                    self._handle_profile(line)
+                elif line.startswith("fact:"):
+                    fact = line[5:].strip()
+                    if fact:
+                        self.memory.add_fact(fact)
+                elif line.startswith("event:"):
+                    event = line[6:].strip()
+                    if event:
+                        self.memory.add_recent_event(event)
+        except Exception:
+            pass  # Background thread — don't crash the app
 
     def _handle_profile(self, line: str):
         """Parse and apply a profile update line.

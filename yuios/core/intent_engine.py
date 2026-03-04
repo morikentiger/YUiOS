@@ -2,6 +2,7 @@
 
 Classifies user messages into intent categories
 to route them to the appropriate agent.
+Also extracts a short topic label for last_topic tracking.
 """
 
 INTENT_TYPES = {
@@ -17,22 +18,38 @@ class IntentEngine:
     def __init__(self, llm_client):
         self.llm = llm_client
 
-    def detect(self, user_message: str) -> str:
+    def detect(self, user_message: str) -> dict:
+        """Detect intent and extract topic in a single LLM call.
+
+        Returns:
+            {"intent": str, "topic": str}
+        """
         intent_list = "\n".join(
             f"- {key}: {desc}" for key, desc in INTENT_TYPES.items()
         )
 
         prompt = (
-            "以下のユーザーメッセージを、最も適切な意図カテゴリに分類してください。\n\n"
+            "以下のユーザーメッセージを分析してください。\n\n"
             f"カテゴリ:\n{intent_list}\n\n"
             f"メッセージ: {user_message}\n\n"
-            "カテゴリ名だけを返してください（例: chat）"
+            "以下の形式で2行だけ返してください:\n"
+            "intent:カテゴリ名\n"
+            "topic:話題を10文字以内で要約"
         )
 
         messages = [{"role": "user", "content": prompt}]
         result = self.llm.chat(messages, temperature=0.0)
 
-        intent = result.strip().lower()
-        if intent not in INTENT_TYPES:
-            return "chat"
-        return intent
+        intent = "chat"
+        topic = ""
+
+        for line in result.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("intent:"):
+                val = line[7:].strip().lower()
+                if val in INTENT_TYPES:
+                    intent = val
+            elif line.startswith("topic:"):
+                topic = line[6:].strip()
+
+        return {"intent": intent, "topic": topic}

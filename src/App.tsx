@@ -83,7 +83,13 @@ function useSpeech() {
 /** Speech-to-Text: microphone input */
 function useMicrophone(onResult: (text: string) => void) {
   const [isListening, setIsListening] = useState(false);
+  const [interim, setInterim] = useState('');
   const recognitionRef = useRef<any>(null);
+  const onResultRef = useRef(onResult);
+  const wantListeningRef = useRef(false);
+
+  // Keep callback ref fresh without recreating recognition
+  onResultRef.current = onResult;
 
   const startListening = useCallback(() => {
     const SpeechRecognition =
@@ -94,26 +100,71 @@ function useMicrophone(onResult: (text: string) => void) {
       return;
     }
 
+    // Stop any existing recognition
+    recognitionRef.current?.stop();
+
     const recognition = new SpeechRecognition();
     recognition.lang = 'ja-JP';
-    recognition.interimResults = false;
-    recognition.continuous = false;
+    recognition.interimResults = true;   // Show real-time text
+    recognition.continuous = true;       // Don't stop on silence
 
     recognition.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      onResult(transcript);
+      let finalTranscript = '';
+      let interimTranscript = '';
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (result.isFinal) {
+          finalTranscript += result[0].transcript;
+        } else {
+          interimTranscript += result[0].transcript;
+        }
+      }
+
+      if (finalTranscript) {
+        setInterim('');
+        onResultRef.current(finalTranscript);
+      } else {
+        setInterim(interimTranscript);
+      }
     };
-    recognition.onend = () => setIsListening(false);
-    recognition.onerror = () => setIsListening(false);
+
+    recognition.onend = () => {
+      // Auto-restart if user hasn't manually stopped
+      if (wantListeningRef.current) {
+        try {
+          recognition.start();
+        } catch {
+          setIsListening(false);
+          wantListeningRef.current = false;
+        }
+        return;
+      }
+      setIsListening(false);
+      setInterim('');
+    };
+
+    recognition.onerror = (e: any) => {
+      // no-speech / aborted are recoverable — let onend handle restart
+      if (e.error === 'no-speech' || e.error === 'aborted') return;
+      // Fatal errors (not-allowed, network, etc.)
+      console.warn('SpeechRecognition error:', e.error);
+      wantListeningRef.current = false;
+      setIsListening(false);
+      setInterim('');
+    };
 
     recognitionRef.current = recognition;
+    wantListeningRef.current = true;
     recognition.start();
     setIsListening(true);
-  }, [onResult]);
+  }, []);
 
   const stopListening = useCallback(() => {
+    wantListeningRef.current = false;
     recognitionRef.current?.stop();
     setIsListening(false);
+    setInterim('');
   }, []);
 
   const toggle = useCallback(() => {
@@ -131,7 +182,7 @@ function useMicrophone(onResult: (text: string) => void) {
       (window as any).webkitSpeechRecognition
     );
 
-  return { isListening, toggle, supported };
+  return { isListening, toggle, supported, interim };
 }
 
 /* ---- SVG Icons ---- */
@@ -223,20 +274,6 @@ export default function App() {
   const { speak, stop: stopSpeaking, isSpeaking, ttsEnabled, setTtsEnabled } =
     useSpeech();
 
-  // Mic: when speech is recognized, put it in the input and auto-send
-  const handleMicResult = useCallback(
-    (text: string) => {
-      if (!text.trim()) return;
-      // Auto-send the recognized speech
-      setInput('');
-      doSend(text.trim());
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isLoading],
-  );
-
-  const mic = useMicrophone(handleMicResult);
-
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
@@ -306,6 +343,17 @@ export default function App() {
     e?.preventDefault();
     doSend(input.trim());
   };
+
+  // Mic: when speech is recognized, auto-send
+  const doSendRef = useRef(doSend);
+  doSendRef.current = doSend;
+
+  const handleMicResult = useCallback((text: string) => {
+    if (!text.trim()) return;
+    doSendRef.current(text.trim());
+  }, []);
+
+  const mic = useMicrophone(handleMicResult);
 
   const hasMessages = messages.length > 0;
 
@@ -481,7 +529,11 @@ export default function App() {
                 }
               }}
               placeholder={
-                mic.isListening ? '聴いてるよ...' : 'YUiに話しかける...'
+                mic.interim
+                  ? `🎤 ${mic.interim}`
+                  : mic.isListening
+                    ? '🎤 聴いてるよ...'
+                    : 'YUiに話しかける...'
               }
               rows={1}
               className="w-full bg-white/[0.05] border border-white/[0.08] rounded-2xl px-5 py-3 pr-12 text-white/90 text-sm placeholder-white/20 focus:outline-none focus:border-[#ff6b9d]/30 focus:bg-white/[0.07] transition-all duration-200 resize-none scrollbar-thin backdrop-blur-sm"

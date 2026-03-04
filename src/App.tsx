@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, FormEvent } from 'react';
+import { useState, useRef, useEffect, useCallback, FormEvent } from 'react';
 
 type Message = {
   id: number;
@@ -6,7 +6,7 @@ type Message = {
   content: string;
 };
 
-/* Avatar fallback when image is not loaded */
+/* ---- Avatar ---- */
 function YUiAvatar({ size = 'sm' }: { size?: 'sm' | 'md' | 'lg' }) {
   const [imgOk, setImgOk] = useState(true);
   const sizeClass =
@@ -37,6 +37,180 @@ function YUiAvatar({ size = 'sm' }: { size?: 'sm' | 'md' | 'lg' }) {
   );
 }
 
+/* ---- Voice hooks ---- */
+
+/** Text-to-Speech: read text aloud in Japanese */
+function useSpeech() {
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [ttsEnabled, setTtsEnabled] = useState(true);
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+
+  const speak = useCallback(
+    (text: string) => {
+      if (!ttsEnabled || !window.speechSynthesis) return;
+      // Stop any current speech
+      window.speechSynthesis.cancel();
+
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'ja-JP';
+      u.rate = 1.1;
+      u.pitch = 1.15;
+
+      // Try to pick a Japanese voice
+      const voices = window.speechSynthesis.getVoices();
+      const jaVoice = voices.find(
+        v => v.lang.startsWith('ja') && v.name.includes('Female'),
+      ) ?? voices.find(v => v.lang.startsWith('ja'));
+      if (jaVoice) u.voice = jaVoice;
+
+      u.onstart = () => setIsSpeaking(true);
+      u.onend = () => setIsSpeaking(false);
+      u.onerror = () => setIsSpeaking(false);
+      utteranceRef.current = u;
+      window.speechSynthesis.speak(u);
+    },
+    [ttsEnabled],
+  );
+
+  const stop = useCallback(() => {
+    window.speechSynthesis.cancel();
+    setIsSpeaking(false);
+  }, []);
+
+  return { speak, stop, isSpeaking, ttsEnabled, setTtsEnabled };
+}
+
+/** Speech-to-Text: microphone input */
+function useMicrophone(onResult: (text: string) => void) {
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
+
+  const startListening = useCallback(() => {
+    const SpeechRecognition =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert('このブラウザは音声認識に対応していません。Chromeをお使いください。');
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'ja-JP';
+    recognition.interimResults = false;
+    recognition.continuous = false;
+
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      onResult(transcript);
+    };
+    recognition.onend = () => setIsListening(false);
+    recognition.onerror = () => setIsListening(false);
+
+    recognitionRef.current = recognition;
+    recognition.start();
+    setIsListening(true);
+  }, [onResult]);
+
+  const stopListening = useCallback(() => {
+    recognitionRef.current?.stop();
+    setIsListening(false);
+  }, []);
+
+  const toggle = useCallback(() => {
+    if (isListening) {
+      stopListening();
+    } else {
+      startListening();
+    }
+  }, [isListening, startListening, stopListening]);
+
+  const supported =
+    typeof window !== 'undefined' &&
+    !!(
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition
+    );
+
+  return { isListening, toggle, supported };
+}
+
+/* ---- SVG Icons ---- */
+
+function MicIcon({ active }: { active: boolean }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={`w-4 h-4 ${active ? 'text-[#ff6b9d]' : 'text-white/60'}`}
+    >
+      <rect x="9" y="2" width="6" height="11" rx="3" />
+      <path d="M19 10v1a7 7 0 01-14 0v-1" />
+      <path d="M12 19v3M8 22h8" />
+    </svg>
+  );
+}
+
+function SpeakerIcon({ on }: { on: boolean }) {
+  if (on) {
+    return (
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="w-4 h-4 text-white/60"
+      >
+        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+        <path d="M15.54 8.46a5 5 0 010 7.07" />
+        <path d="M19.07 4.93a10 10 0 010 14.14" />
+      </svg>
+    );
+  }
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="w-4 h-4 text-white/30"
+    >
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+      <line x1="23" y1="9" x2="17" y2="15" />
+      <line x1="17" y1="9" x2="23" y2="15" />
+    </svg>
+  );
+}
+
+function SendIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="w-3.5 h-3.5 text-white"
+    >
+      <path d="M12 19V5M5 12l7-7 7 7" />
+    </svg>
+  );
+}
+
+/* ---- Main App ---- */
+
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -46,12 +220,38 @@ export default function App() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  const { speak, stop: stopSpeaking, isSpeaking, ttsEnabled, setTtsEnabled } =
+    useSpeech();
+
+  // Mic: when speech is recognized, put it in the input and auto-send
+  const handleMicResult = useCallback(
+    (text: string) => {
+      if (!text.trim()) return;
+      // Auto-send the recognized speech
+      setInput('');
+      doSend(text.trim());
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [isLoading],
+  );
+
+  const mic = useMicrophone(handleMicResult);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
 
   useEffect(() => {
     textareaRef.current?.focus();
+  }, []);
+
+  // Load voices (some browsers load them async)
+  useEffect(() => {
+    window.speechSynthesis?.getVoices();
+    const handler = () => window.speechSynthesis?.getVoices();
+    window.speechSynthesis?.addEventListener?.('voiceschanged', handler);
+    return () =>
+      window.speechSynthesis?.removeEventListener?.('voiceschanged', handler);
   }, []);
 
   const adjustHeight = () => {
@@ -62,10 +262,11 @@ export default function App() {
     }
   };
 
-  const sendMessage = async (e?: FormEvent) => {
-    e?.preventDefault();
-    const text = input.trim();
+  const doSend = async (text: string) => {
     if (!text || isLoading) return;
+
+    // Stop any current speech when user sends a new message
+    stopSpeaking();
 
     const userMsg: Message = { id: Date.now(), role: 'user', content: text };
     setMessages(prev => [...prev, userMsg]);
@@ -81,24 +282,29 @@ export default function App() {
       });
       if (!res.ok) throw new Error('API error');
       const data = await res.json();
+      const aiContent = data.response;
       setMessages(prev => [
         ...prev,
-        { id: Date.now() + 1, role: 'assistant', content: data.response },
+        { id: Date.now() + 1, role: 'assistant', content: aiContent },
       ]);
+      // Read aloud
+      speak(aiContent);
     } catch {
+      const errMsg =
+        'ごめんね、うまく接続できなかった。サーバーが起動しているか確認してね。\n\npython3 -m uvicorn server:app --port 8000';
       setMessages(prev => [
         ...prev,
-        {
-          id: Date.now() + 1,
-          role: 'assistant',
-          content:
-            'ごめんね、うまく接続できなかった。サーバーが起動しているか確認してね。\n\npython3 -m uvicorn server:app --port 8000',
-        },
+        { id: Date.now() + 1, role: 'assistant', content: errMsg },
       ]);
     } finally {
       setIsLoading(false);
       textareaRef.current?.focus();
     }
+  };
+
+  const sendMessage = async (e?: FormEvent) => {
+    e?.preventDefault();
+    doSend(input.trim());
   };
 
   const hasMessages = messages.length > 0;
@@ -120,16 +326,29 @@ export default function App() {
       <div className="absolute top-[-200px] left-1/2 -translate-x-1/2 w-[500px] h-[500px] bg-[#ff6b9d]/[0.04] rounded-full blur-[100px] pointer-events-none" />
       <div className="absolute bottom-[-100px] left-1/2 -translate-x-1/2 w-[400px] h-[300px] bg-[#7eb8ff]/[0.03] rounded-full blur-[80px] pointer-events-none" />
 
-      {/* Chat header (shown during conversation) */}
+      {/* Chat header */}
       {hasMessages && (
         <div className="w-full max-w-2xl px-5 py-3 flex items-center gap-3 border-b border-white/[0.06] flex-shrink-0 animate-fadeIn z-10">
           <YUiAvatar size="lg" />
-          <div>
+          <div className="flex-1">
             <p className="text-white/90 text-sm font-medium tracking-wide">
               YUi
             </p>
-            <p className="text-[#ff6b9d]/50 text-[11px]">online</p>
+            <p className="text-[#ff6b9d]/50 text-[11px]">
+              {isSpeaking ? 'speaking...' : 'online'}
+            </p>
           </div>
+          {/* TTS toggle */}
+          <button
+            onClick={() => {
+              if (isSpeaking) stopSpeaking();
+              setTtsEnabled(v => !v);
+            }}
+            className="w-8 h-8 rounded-lg hover:bg-white/[0.06] flex items-center justify-center transition-colors"
+            title={ttsEnabled ? '読み上げOFF' : '読み上げON'}
+          >
+            <SpeakerIcon on={ttsEnabled} />
+          </button>
         </div>
       )}
 
@@ -217,53 +436,64 @@ export default function App() {
 
       {/* Input area */}
       <div className="w-full max-w-2xl px-4 pb-6 pt-3 flex-shrink-0 z-10">
-        <form onSubmit={sendMessage} className="relative">
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={e => {
-              setInput(e.target.value);
-              adjustHeight();
-            }}
-            onCompositionStart={() => {
-              isComposingRef.current = true;
-            }}
-            onCompositionEnd={e => {
-              isComposingRef.current = false;
-              setInput((e.target as HTMLTextAreaElement).value);
-            }}
-            onKeyDown={e => {
-              if (
-                e.key === 'Enter' &&
-                !e.shiftKey &&
-                !isComposingRef.current
-              ) {
-                e.preventDefault();
-                sendMessage();
-              }
-            }}
-            placeholder="YUiに話しかける..."
-            rows={1}
-            className="w-full bg-white/[0.05] border border-white/[0.08] rounded-2xl px-5 py-3 pr-12 text-white/90 text-sm placeholder-white/20 focus:outline-none focus:border-[#ff6b9d]/30 focus:bg-white/[0.07] transition-all duration-200 resize-none scrollbar-thin backdrop-blur-sm"
-          />
-          <button
-            type="submit"
-            disabled={isLoading || !input.trim()}
-            className="absolute right-2.5 bottom-2 w-8 h-8 rounded-xl bg-[#ff6b9d]/70 hover:bg-[#ff6b9d] disabled:bg-white/[0.06] flex items-center justify-center transition-all duration-200"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={2.5}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="w-3.5 h-3.5 text-white"
+        <form onSubmit={sendMessage} className="relative flex items-end gap-2">
+          {/* Mic button */}
+          {mic.supported && (
+            <button
+              type="button"
+              onClick={mic.toggle}
+              disabled={isLoading}
+              className={`w-10 h-10 rounded-2xl flex items-center justify-center transition-all duration-200 flex-shrink-0 ${
+                mic.isListening
+                  ? 'bg-[#ff6b9d]/30 border border-[#ff6b9d]/40 mic-pulse'
+                  : 'bg-white/[0.05] border border-white/[0.08] hover:bg-white/[0.08]'
+              }`}
+              title={mic.isListening ? '停止' : 'マイク'}
             >
-              <path d="M12 19V5M5 12l7-7 7 7" />
-            </svg>
-          </button>
+              <MicIcon active={mic.isListening} />
+            </button>
+          )}
+
+          {/* Text input */}
+          <div className="relative flex-1">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={e => {
+                setInput(e.target.value);
+                adjustHeight();
+              }}
+              onCompositionStart={() => {
+                isComposingRef.current = true;
+              }}
+              onCompositionEnd={e => {
+                isComposingRef.current = false;
+                setInput((e.target as HTMLTextAreaElement).value);
+              }}
+              onKeyDown={e => {
+                if (
+                  e.key === 'Enter' &&
+                  !e.shiftKey &&
+                  !isComposingRef.current
+                ) {
+                  e.preventDefault();
+                  sendMessage();
+                }
+              }}
+              placeholder={
+                mic.isListening ? '聴いてるよ...' : 'YUiに話しかける...'
+              }
+              rows={1}
+              className="w-full bg-white/[0.05] border border-white/[0.08] rounded-2xl px-5 py-3 pr-12 text-white/90 text-sm placeholder-white/20 focus:outline-none focus:border-[#ff6b9d]/30 focus:bg-white/[0.07] transition-all duration-200 resize-none scrollbar-thin backdrop-blur-sm"
+            />
+            <button
+              type="submit"
+              disabled={isLoading || !input.trim()}
+              className="absolute right-2.5 bottom-2 w-8 h-8 rounded-xl bg-[#ff6b9d]/70 hover:bg-[#ff6b9d] disabled:bg-white/[0.06] flex items-center justify-center transition-all duration-200"
+            >
+              <SendIcon />
+            </button>
+          </div>
         </form>
       </div>
     </div>

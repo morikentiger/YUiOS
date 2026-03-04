@@ -93,3 +93,17 @@ body {
 .animate-slideUp {
   animation: slideUp 0.3s ease-out;
 }
+
+/* Mic pulse animation when listening */
+@keyframes micPulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(255, 107, 157, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(255, 107, 157, 0);
+  }
+}
+
+.mic-pulse {
+  animation: micPulse 1.5s ease-in-out infinite;
+}

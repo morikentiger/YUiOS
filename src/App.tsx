@@ -89,16 +89,28 @@ function useSpeech() {
   return { speak, stop, isSpeaking, ttsEnabled, setTtsEnabled, spokenTextRef };
 }
 
-/** Speech-to-Text: microphone input — always active, no muting */
-function useMicrophone(onResult: (text: string) => void) {
+/**
+ * Speech-to-Text with built-in echo detection.
+ *
+ * @param onResult   Called when user speech is recognized (echo filtered out)
+ * @param onInterrupt Called when user interrupts TTS (echo text differs from TTS)
+ * @param echoTextRef Ref to the text TTS is currently speaking — used to filter echo
+ */
+function useMicrophone(
+  onResult: (text: string) => void,
+  onInterrupt: () => void,
+  echoTextRef: React.MutableRefObject<string>,
+) {
   const [isListening, setIsListening] = useState(false);
   const [interim, setInterim] = useState('');
   const [error, setError] = useState('');
   const recognitionRef = useRef<any>(null);
   const onResultRef = useRef(onResult);
+  const onInterruptRef = useRef(onInterrupt);
   const wantListeningRef = useRef(false);
 
   onResultRef.current = onResult;
+  onInterruptRef.current = onInterrupt;
 
   const startListening = useCallback(() => {
     const SpeechRecognition =
@@ -130,11 +142,33 @@ function useMicrophone(onResult: (text: string) => void) {
         }
       }
 
+      const ttsText = echoTextRef.current;
+
+      // ---- Interim results ----
+      if (!finalTranscript && interimTranscript) {
+        if (ttsText && echoScore(interimTranscript, ttsText) > 0.4) {
+          // Interim matches TTS → echo, don't show
+          return;
+        }
+        setInterim(interimTranscript);
+        return;
+      }
+
+      // ---- Final results ----
       if (finalTranscript) {
         setInterim('');
+
+        if (ttsText) {
+          const score = echoScore(finalTranscript, ttsText);
+          if (score > 0.4) {
+            // Echo — YUi's own voice, ignore
+            return;
+          }
+          // Different content while TTS is speaking → user interrupt!
+          onInterruptRef.current();
+        }
+
         onResultRef.current(finalTranscript);
-      } else {
-        setInterim(interimTranscript);
       }
     };
 
@@ -179,7 +213,7 @@ function useMicrophone(onResult: (text: string) => void) {
       setError(`開始エラー: ${(err as Error).message}`);
       wantListeningRef.current = false;
     }
-  }, []);
+  }, [echoTextRef]);
 
   const stopListening = useCallback(() => {
     wantListeningRef.current = false;
@@ -207,17 +241,34 @@ function useMicrophone(onResult: (text: string) => void) {
 }
 
 /**
- * Echo detection: is the recognized text just YUi's own voice?
- * Compares normalized strings — if the recognized text is a substring
- * of what TTS is saying (or vice versa), it's echo.
+ * Echo similarity score (0–1).
+ *
+ * Uses longest-common-subsequence (LCS) ratio against the TTS text.
+ * Handles kanji↔hiragana differences, punctuation gaps, etc.
+ * Score > 0.4 → likely echo.
  */
-function isEchoOfTTS(recognized: string, ttsText: string): boolean {
+function echoScore(recognized: string, ttsText: string): number {
   const norm = (s: string) =>
-    s.replace(/[\s、。！？.,!?\n\r]/g, '').toLowerCase();
+    s.replace(/[\s、。！？.,!?\n\r「」『』（）()\-―…·]/g, '');
   const r = norm(recognized);
   const t = norm(ttsText);
-  if (!r || r.length < 2) return false;
-  return t.includes(r) || r.includes(t);
+  if (!r || !t) return 0;
+
+  // 1. Fast path: exact substring
+  if (t.includes(r) || r.includes(t)) return 1.0;
+
+  // 2. LCS ratio — how much of 'r' appears in 't' in order
+  let matched = 0;
+  let tIdx = 0;
+  for (const ch of r) {
+    const pos = t.indexOf(ch, tIdx);
+    if (pos !== -1) {
+      matched++;
+      tIdx = pos + 1;
+    }
+  }
+
+  return matched / r.length;
 }
 
 /* ---- SVG Icons ---- */
@@ -381,29 +432,24 @@ export default function App() {
     doSend(input.trim());
   };
 
-  // Mic: echo detection + interrupt support
+  // Mic: stable refs for callbacks
   const doSendRef = useRef(doSend);
   doSendRef.current = doSend;
   const stopSpeakingRef = useRef(stopSpeaking);
   stopSpeakingRef.current = stopSpeaking;
 
+  // Called when mic recognizes user speech (echo already filtered)
   const handleMicResult = useCallback((text: string) => {
     if (!text.trim()) return;
-
-    // If TTS is speaking, check if this is YUi's own voice (echo)
-    if (spokenTextRef.current) {
-      if (isEchoOfTTS(text, spokenTextRef.current)) {
-        // YUi's echo — ignore
-        return;
-      }
-      // User is interrupting! Stop TTS and send their message
-      stopSpeakingRef.current();
-    }
-
     doSendRef.current(text.trim());
-  }, [spokenTextRef]);
+  }, []);
 
-  const mic = useMicrophone(handleMicResult);
+  // Called when user interrupts TTS with their own voice
+  const handleInterrupt = useCallback(() => {
+    stopSpeakingRef.current();
+  }, []);
+
+  const mic = useMicrophone(handleMicResult, handleInterrupt, spokenTextRef);
 
   const hasMessages = messages.length > 0;
 

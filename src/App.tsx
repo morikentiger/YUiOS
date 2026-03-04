@@ -44,19 +44,21 @@ function useSpeech() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [ttsEnabled, setTtsEnabled] = useState(true);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  /** What YUi is currently saying — used by mic for echo detection */
+  const spokenTextRef = useRef('');
 
   const speak = useCallback(
     (text: string) => {
       if (!ttsEnabled || !window.speechSynthesis) return;
-      // Stop any current speech
       window.speechSynthesis.cancel();
+
+      spokenTextRef.current = text;
 
       const u = new SpeechSynthesisUtterance(text);
       u.lang = 'ja-JP';
       u.rate = 1.1;
       u.pitch = 1.15;
 
-      // Try to pick a Japanese voice
       const voices = window.speechSynthesis.getVoices();
       const jaVoice = voices.find(
         v => v.lang.startsWith('ja') && v.name.includes('Female'),
@@ -64,8 +66,14 @@ function useSpeech() {
       if (jaVoice) u.voice = jaVoice;
 
       u.onstart = () => setIsSpeaking(true);
-      u.onend = () => setIsSpeaking(false);
-      u.onerror = () => setIsSpeaking(false);
+      u.onend = () => {
+        setIsSpeaking(false);
+        spokenTextRef.current = '';
+      };
+      u.onerror = () => {
+        setIsSpeaking(false);
+        spokenTextRef.current = '';
+      };
       utteranceRef.current = u;
       window.speechSynthesis.speak(u);
     },
@@ -75,31 +83,22 @@ function useSpeech() {
   const stop = useCallback(() => {
     window.speechSynthesis.cancel();
     setIsSpeaking(false);
+    spokenTextRef.current = '';
   }, []);
 
-  return { speak, stop, isSpeaking, ttsEnabled, setTtsEnabled };
+  return { speak, stop, isSpeaking, ttsEnabled, setTtsEnabled, spokenTextRef };
 }
 
-/**
- * Speech-to-Text: microphone input.
- * @param muted  When true, recognition is paused (e.g. while TTS is speaking)
- *               so the mic doesn't pick up YUi's own voice.
- */
-function useMicrophone(
-  onResult: (text: string) => void,
-  muted: boolean,
-) {
+/** Speech-to-Text: microphone input — always active, no muting */
+function useMicrophone(onResult: (text: string) => void) {
   const [isListening, setIsListening] = useState(false);
   const [interim, setInterim] = useState('');
   const [error, setError] = useState('');
   const recognitionRef = useRef<any>(null);
   const onResultRef = useRef(onResult);
   const wantListeningRef = useRef(false);
-  const mutedRef = useRef(muted);
 
-  // Keep refs fresh
   onResultRef.current = onResult;
-  mutedRef.current = muted;
 
   const startListening = useCallback(() => {
     const SpeechRecognition =
@@ -111,8 +110,6 @@ function useMicrophone(
     }
 
     setError('');
-
-    // Stop any existing recognition
     try { recognitionRef.current?.stop(); } catch { /* ignore */ }
 
     const recognition = new SpeechRecognition();
@@ -121,9 +118,6 @@ function useMicrophone(
     recognition.continuous = true;
 
     recognition.onresult = (event: any) => {
-      // Ignore everything while TTS is speaking
-      if (mutedRef.current) return;
-
       let finalTranscript = '';
       let interimTranscript = '';
 
@@ -145,7 +139,6 @@ function useMicrophone(
     };
 
     recognition.onend = () => {
-      // Auto-restart if user hasn't manually stopped
       if (wantListeningRef.current) {
         setTimeout(() => {
           if (wantListeningRef.current) {
@@ -164,9 +157,7 @@ function useMicrophone(
     };
 
     recognition.onerror = (e: any) => {
-      // Recoverable errors — let onend handle restart
       if (e.error === 'no-speech' || e.error === 'aborted') return;
-      // Fatal errors
       wantListeningRef.current = false;
       setIsListening(false);
       setInterim('');
@@ -184,7 +175,7 @@ function useMicrophone(
     try {
       recognition.start();
       setIsListening(true);
-    } catch (err: any) {
+    } catch (err) {
       setError(`開始エラー: ${(err as Error).message}`);
       wantListeningRef.current = false;
     }
@@ -205,11 +196,6 @@ function useMicrophone(
     }
   }, [isListening, startListening, stopListening]);
 
-  // Clear interim when muted (TTS speaking)
-  useEffect(() => {
-    if (muted) setInterim('');
-  }, [muted]);
-
   const supported =
     typeof window !== 'undefined' &&
     !!(
@@ -218,6 +204,20 @@ function useMicrophone(
     );
 
   return { isListening, toggle, supported, interim, error };
+}
+
+/**
+ * Echo detection: is the recognized text just YUi's own voice?
+ * Compares normalized strings — if the recognized text is a substring
+ * of what TTS is saying (or vice versa), it's echo.
+ */
+function isEchoOfTTS(recognized: string, ttsText: string): boolean {
+  const norm = (s: string) =>
+    s.replace(/[\s、。！？.,!?\n\r]/g, '').toLowerCase();
+  const r = norm(recognized);
+  const t = norm(ttsText);
+  if (!r || r.length < 2) return false;
+  return t.includes(r) || r.includes(t);
 }
 
 /* ---- SVG Icons ---- */
@@ -306,8 +306,10 @@ export default function App() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const { speak, stop: stopSpeaking, isSpeaking, ttsEnabled, setTtsEnabled } =
-    useSpeech();
+  const {
+    speak, stop: stopSpeaking, isSpeaking,
+    ttsEnabled, setTtsEnabled, spokenTextRef,
+  } = useSpeech();
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -379,16 +381,29 @@ export default function App() {
     doSend(input.trim());
   };
 
-  // Mic: when speech is recognized, auto-send
+  // Mic: echo detection + interrupt support
   const doSendRef = useRef(doSend);
   doSendRef.current = doSend;
+  const stopSpeakingRef = useRef(stopSpeaking);
+  stopSpeakingRef.current = stopSpeaking;
 
   const handleMicResult = useCallback((text: string) => {
     if (!text.trim()) return;
-    doSendRef.current(text.trim());
-  }, []);
 
-  const mic = useMicrophone(handleMicResult, isSpeaking);
+    // If TTS is speaking, check if this is YUi's own voice (echo)
+    if (spokenTextRef.current) {
+      if (isEchoOfTTS(text, spokenTextRef.current)) {
+        // YUi's echo — ignore
+        return;
+      }
+      // User is interrupting! Stop TTS and send their message
+      stopSpeakingRef.current();
+    }
+
+    doSendRef.current(text.trim());
+  }, [spokenTextRef]);
+
+  const mic = useMicrophone(handleMicResult);
 
   const hasMessages = messages.length > 0;
 
@@ -570,10 +585,10 @@ export default function App() {
                 }
               }}
               placeholder={
-                isSpeaking && mic.isListening
-                  ? '🔇 読み上げ中...終わったら聴くね'
-                  : mic.interim
-                    ? `🎤 ${mic.interim}`
+                mic.interim
+                  ? `🎤 ${mic.interim}`
+                  : mic.isListening && isSpeaking
+                    ? '🎤 聴いてるよ（割り込みOK）'
                     : mic.isListening
                       ? '🎤 聴いてるよ...'
                       : 'YUiに話しかける...'

@@ -7,8 +7,14 @@ memory:
   path: data/memory.json
 
 voice:
-  enabled: false
+  enabled: true
   language: ja-JP
+
+tts:
+  provider: style-bert-vits2  # "browser" to use browser TTS only
+  url: http://localhost:5000
+  model_id: 0
+  style: Neutral
 
 personality:
   name: YUi

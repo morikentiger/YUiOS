@@ -7,3 +7,4 @@ __pycache__/
 *.pyc
 public/images/*.png
 public/images/*.jpg
+tts/

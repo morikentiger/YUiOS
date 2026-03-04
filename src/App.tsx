@@ -39,18 +39,24 @@ function YUiAvatar({ size = 'sm' }: { size?: 'sm' | 'md' | 'lg' }) {
 
 /* ---- Voice hooks ---- */
 
-/** Text-to-Speech: read text aloud in Japanese */
+/**
+ * Text-to-Speech hook.
+ *
+ * Primary:  Style-BERT-VITS2 via /api/tts → plays wav with <audio>
+ * Fallback: Browser SpeechSynthesis (if TTS server is unavailable)
+ */
 function useSpeech() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [ttsEnabled, setTtsEnabled] = useState(true);
-  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   /** What YUi is currently saying — used by mic for echo detection */
   const spokenTextRef = useRef('');
   /** Timer to delay clearing spokenTextRef after TTS ends */
   const echoClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Current audio element (for stop/interrupt) */
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  /** Object URL to revoke after playback */
+  const audioUrlRef = useRef<string | null>(null);
 
-  // Delay clearing echo text so recognition finals that arrive
-  // right after TTS ends are still caught as echo.
   const scheduleClearEcho = useCallback(() => {
     if (echoClearTimer.current) clearTimeout(echoClearTimer.current);
     echoClearTimer.current = setTimeout(() => {
@@ -58,13 +64,22 @@ function useSpeech() {
     }, 3000);
   }, []);
 
-  const speak = useCallback(
-    (text: string) => {
-      if (!ttsEnabled || !window.speechSynthesis) return;
-      window.speechSynthesis.cancel();
-      if (echoClearTimer.current) clearTimeout(echoClearTimer.current);
+  const cleanupAudio = useCallback(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
+  }, []);
 
-      spokenTextRef.current = text;
+  // Fallback: browser TTS
+  const fallbackSpeak = useCallback(
+    (text: string) => {
+      if (!window.speechSynthesis) return;
+      window.speechSynthesis.cancel();
 
       const u = new SpeechSynthesisUtterance(text);
       u.lang = 'ja-JP';
@@ -72,33 +87,82 @@ function useSpeech() {
       u.pitch = 1.15;
 
       const voices = window.speechSynthesis.getVoices();
-      const jaVoice = voices.find(
-        v => v.lang.startsWith('ja') && v.name.includes('Female'),
-      ) ?? voices.find(v => v.lang.startsWith('ja'));
+      const jaVoice =
+        voices.find(v => v.lang.startsWith('ja') && v.name.includes('Female')) ??
+        voices.find(v => v.lang.startsWith('ja'));
       if (jaVoice) u.voice = jaVoice;
 
       u.onstart = () => setIsSpeaking(true);
       u.onend = () => {
         setIsSpeaking(false);
-        scheduleClearEcho(); // Don't clear immediately!
+        scheduleClearEcho();
       };
       u.onerror = () => {
         setIsSpeaking(false);
         scheduleClearEcho();
       };
-      utteranceRef.current = u;
       window.speechSynthesis.speak(u);
     },
-    [ttsEnabled, scheduleClearEcho],
+    [scheduleClearEcho],
   );
 
-  // User-initiated stop (interrupt) → clear echo immediately
+  const speak = useCallback(
+    async (text: string) => {
+      if (!ttsEnabled) return;
+
+      // Stop any current playback
+      cleanupAudio();
+      window.speechSynthesis?.cancel();
+      if (echoClearTimer.current) clearTimeout(echoClearTimer.current);
+
+      spokenTextRef.current = text;
+
+      // Try Style-BERT-VITS2 first
+      try {
+        const res = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+
+        if (!res.ok) throw new Error(`TTS ${res.status}`);
+
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        audioUrlRef.current = url;
+
+        const audio = new Audio(url);
+        audioRef.current = audio;
+
+        audio.onplay = () => setIsSpeaking(true);
+        audio.onended = () => {
+          setIsSpeaking(false);
+          scheduleClearEcho();
+          cleanupAudio();
+        };
+        audio.onerror = () => {
+          setIsSpeaking(false);
+          scheduleClearEcho();
+          cleanupAudio();
+        };
+
+        await audio.play();
+      } catch {
+        // Style-BERT-VITS2 unavailable → fallback to browser TTS
+        fallbackSpeak(text);
+      }
+    },
+    [ttsEnabled, scheduleClearEcho, cleanupAudio, fallbackSpeak],
+  );
+
+  // User-initiated stop (interrupt)
   const stop = useCallback(() => {
-    window.speechSynthesis.cancel();
+    cleanupAudio();
+    window.speechSynthesis?.cancel();
     setIsSpeaking(false);
     if (echoClearTimer.current) clearTimeout(echoClearTimer.current);
     spokenTextRef.current = '';
-  }, []);
+  }, [cleanupAudio]);
 
   return { speak, stop, isSpeaking, ttsEnabled, setTtsEnabled, spokenTextRef };
 }

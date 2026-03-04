@@ -46,11 +46,23 @@ function useSpeech() {
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   /** What YUi is currently saying — used by mic for echo detection */
   const spokenTextRef = useRef('');
+  /** Timer to delay clearing spokenTextRef after TTS ends */
+  const echoClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Delay clearing echo text so recognition finals that arrive
+  // right after TTS ends are still caught as echo.
+  const scheduleClearEcho = useCallback(() => {
+    if (echoClearTimer.current) clearTimeout(echoClearTimer.current);
+    echoClearTimer.current = setTimeout(() => {
+      spokenTextRef.current = '';
+    }, 3000);
+  }, []);
 
   const speak = useCallback(
     (text: string) => {
       if (!ttsEnabled || !window.speechSynthesis) return;
       window.speechSynthesis.cancel();
+      if (echoClearTimer.current) clearTimeout(echoClearTimer.current);
 
       spokenTextRef.current = text;
 
@@ -68,21 +80,23 @@ function useSpeech() {
       u.onstart = () => setIsSpeaking(true);
       u.onend = () => {
         setIsSpeaking(false);
-        spokenTextRef.current = '';
+        scheduleClearEcho(); // Don't clear immediately!
       };
       u.onerror = () => {
         setIsSpeaking(false);
-        spokenTextRef.current = '';
+        scheduleClearEcho();
       };
       utteranceRef.current = u;
       window.speechSynthesis.speak(u);
     },
-    [ttsEnabled],
+    [ttsEnabled, scheduleClearEcho],
   );
 
+  // User-initiated stop (interrupt) → clear echo immediately
   const stop = useCallback(() => {
     window.speechSynthesis.cancel();
     setIsSpeaking(false);
+    if (echoClearTimer.current) clearTimeout(echoClearTimer.current);
     spokenTextRef.current = '';
   }, []);
 

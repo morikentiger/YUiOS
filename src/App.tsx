@@ -80,35 +80,50 @@ function useSpeech() {
   return { speak, stop, isSpeaking, ttsEnabled, setTtsEnabled };
 }
 
-/** Speech-to-Text: microphone input */
-function useMicrophone(onResult: (text: string) => void) {
+/**
+ * Speech-to-Text: microphone input.
+ * @param muted  When true, recognition is paused (e.g. while TTS is speaking)
+ *               so the mic doesn't pick up YUi's own voice.
+ */
+function useMicrophone(
+  onResult: (text: string) => void,
+  muted: boolean,
+) {
   const [isListening, setIsListening] = useState(false);
   const [interim, setInterim] = useState('');
+  const [error, setError] = useState('');
   const recognitionRef = useRef<any>(null);
   const onResultRef = useRef(onResult);
   const wantListeningRef = useRef(false);
+  const mutedRef = useRef(muted);
 
-  // Keep callback ref fresh without recreating recognition
+  // Keep refs fresh
   onResultRef.current = onResult;
+  mutedRef.current = muted;
 
   const startListening = useCallback(() => {
     const SpeechRecognition =
       (window as any).SpeechRecognition ||
       (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      alert('このブラウザは音声認識に対応していません。Chromeをお使いください。');
+      setError('このブラウザは音声認識に対応していません。Google Chromeをお使いください。');
       return;
     }
 
+    setError('');
+
     // Stop any existing recognition
-    recognitionRef.current?.stop();
+    try { recognitionRef.current?.stop(); } catch { /* ignore */ }
 
     const recognition = new SpeechRecognition();
     recognition.lang = 'ja-JP';
-    recognition.interimResults = true;   // Show real-time text
-    recognition.continuous = true;       // Don't stop on silence
+    recognition.interimResults = true;
+    recognition.continuous = true;
 
     recognition.onresult = (event: any) => {
+      // Ignore everything while TTS is speaking
+      if (mutedRef.current) return;
+
       let finalTranscript = '';
       let interimTranscript = '';
 
@@ -132,12 +147,16 @@ function useMicrophone(onResult: (text: string) => void) {
     recognition.onend = () => {
       // Auto-restart if user hasn't manually stopped
       if (wantListeningRef.current) {
-        try {
-          recognition.start();
-        } catch {
-          setIsListening(false);
-          wantListeningRef.current = false;
-        }
+        setTimeout(() => {
+          if (wantListeningRef.current) {
+            try {
+              recognition.start();
+            } catch {
+              setIsListening(false);
+              wantListeningRef.current = false;
+            }
+          }
+        }, 300);
         return;
       }
       setIsListening(false);
@@ -145,24 +164,35 @@ function useMicrophone(onResult: (text: string) => void) {
     };
 
     recognition.onerror = (e: any) => {
-      // no-speech / aborted are recoverable — let onend handle restart
+      // Recoverable errors — let onend handle restart
       if (e.error === 'no-speech' || e.error === 'aborted') return;
-      // Fatal errors (not-allowed, network, etc.)
-      console.warn('SpeechRecognition error:', e.error);
+      // Fatal errors
       wantListeningRef.current = false;
       setIsListening(false);
       setInterim('');
+      if (e.error === 'not-allowed') {
+        setError('マイクの使用が許可されていません。ブラウザの設定 → サイトの設定 → マイクで許可してください。');
+      } else if (e.error === 'network') {
+        setError('音声認識サーバーに接続できません。インターネット接続を確認してください。');
+      } else {
+        setError(`音声認識エラー: ${e.error}`);
+      }
     };
 
     recognitionRef.current = recognition;
     wantListeningRef.current = true;
-    recognition.start();
-    setIsListening(true);
+    try {
+      recognition.start();
+      setIsListening(true);
+    } catch (err: any) {
+      setError(`開始エラー: ${(err as Error).message}`);
+      wantListeningRef.current = false;
+    }
   }, []);
 
   const stopListening = useCallback(() => {
     wantListeningRef.current = false;
-    recognitionRef.current?.stop();
+    try { recognitionRef.current?.stop(); } catch { /* ignore */ }
     setIsListening(false);
     setInterim('');
   }, []);
@@ -175,6 +205,11 @@ function useMicrophone(onResult: (text: string) => void) {
     }
   }, [isListening, startListening, stopListening]);
 
+  // Clear interim when muted (TTS speaking)
+  useEffect(() => {
+    if (muted) setInterim('');
+  }, [muted]);
+
   const supported =
     typeof window !== 'undefined' &&
     !!(
@@ -182,7 +217,7 @@ function useMicrophone(onResult: (text: string) => void) {
       (window as any).webkitSpeechRecognition
     );
 
-  return { isListening, toggle, supported, interim };
+  return { isListening, toggle, supported, interim, error };
 }
 
 /* ---- SVG Icons ---- */
@@ -353,7 +388,7 @@ export default function App() {
     doSendRef.current(text.trim());
   }, []);
 
-  const mic = useMicrophone(handleMicResult);
+  const mic = useMicrophone(handleMicResult, isSpeaking);
 
   const hasMessages = messages.length > 0;
 
@@ -484,6 +519,12 @@ export default function App() {
 
       {/* Input area */}
       <div className="w-full max-w-2xl px-4 pb-6 pt-3 flex-shrink-0 z-10">
+        {/* Mic error message */}
+        {mic.error && (
+          <div className="mb-2 px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-xs animate-fadeIn">
+            {mic.error}
+          </div>
+        )}
         <form onSubmit={sendMessage} className="relative flex items-end gap-2">
           {/* Mic button */}
           {mic.supported && (
@@ -529,11 +570,13 @@ export default function App() {
                 }
               }}
               placeholder={
-                mic.interim
-                  ? `🎤 ${mic.interim}`
-                  : mic.isListening
-                    ? '🎤 聴いてるよ...'
-                    : 'YUiに話しかける...'
+                isSpeaking && mic.isListening
+                  ? '🔇 読み上げ中...終わったら聴くね'
+                  : mic.interim
+                    ? `🎤 ${mic.interim}`
+                    : mic.isListening
+                      ? '🎤 聴いてるよ...'
+                      : 'YUiに話しかける...'
               }
               rows={1}
               className="w-full bg-white/[0.05] border border-white/[0.08] rounded-2xl px-5 py-3 pr-12 text-white/90 text-sm placeholder-white/20 focus:outline-none focus:border-[#ff6b9d]/30 focus:bg-white/[0.07] transition-all duration-200 resize-none scrollbar-thin backdrop-blur-sm"

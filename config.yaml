@@ -12,7 +12,7 @@ voice:
 
 tts:
   provider: style-bert-vits2  # "browser" to use browser TTS only
-  url: http://localhost:5000
+  url: http://localhost:5001
   model_id: 0
   style: Neutral
 

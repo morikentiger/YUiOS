@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Optional
 
 import httpx
 import yaml
@@ -49,7 +50,7 @@ class ChatRequest(BaseModel):
 
 class TTSRequest(BaseModel):
     text: str
-    style: str | None = None
+    style: Optional[str] = None
 
 
 @app.post("/api/chat")

@@ -17,5 +17,5 @@ fi
 cd "$TTS_DIR"
 source venv/bin/activate
 
-echo "Starting Style-BERT-VITS2 on port 5000..."
-python server_fastapi.py --port 5000
+echo "Starting Style-BERT-VITS2 on port 5001 (configured in tts/config.yml)..."
+python server_fastapi.py
